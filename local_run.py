@@ -44,6 +44,7 @@ def main():
             print(f"SRT subtitle already exists at {srt_path}.")
         
         # In LITE_MODE, we use srt as caption file
+        os.makedirs(captions_dir, exist_ok=True)
         process_video_lite(captions_dir, srt_path)
         caption_file = os.path.join(captions_dir, "captions.json")
     else:
