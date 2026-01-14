@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import os
+import tempfile
 from typing import Annotated as A
 
 import numpy as np
@@ -10,6 +11,8 @@ from tqdm import tqdm
 import dvd.config as config
 from dvd.func_call_shema import doc as D
 from dvd.utils import AzureOpenAIEmbeddingService, call_openai_model_with_tools
+from dvd.gemini_utils import call_gemini_with_video_clip, call_gemini_with_frames
+from dvd.video_utils import extract_video_clip
 
 
 def frame_inspect_tool(
@@ -98,6 +101,62 @@ def frame_inspect_tool(
     files = [
         os.path.join(video_file_root, "frames", f"frame_n{fn:06d}.jpg") for fn in framepoints
     ]
+
+    use_gemini = config.USE_GEMINI_FOR_VLM and config.GEMINI_API_KEY
+
+    if use_gemini:
+        raw_video_path = os.path.join(video_file_root, "..", "raw")
+        video_id = os.path.basename(video_file_root)
+        potential_video_path = os.path.join(raw_video_path, f"{video_id}.mp4")
+
+        if os.path.exists(potential_video_path) and len(time_ranges_secs) > 0:
+            start_sec = min(t[0] for t in time_ranges_secs)
+            end_sec = max(t[1] for t in time_ranges_secs)
+
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                clip_path = tmp.name
+
+            try:
+                extract_video_clip(potential_video_path, start_sec, end_sec, clip_path)
+
+                prompt = f"Carefully watch this video clip. Pay attention to the cause and sequence of events, the detail and movement of objects and the action and pose of persons.\n\nBased on your observations, answer this question. If no relevant content is found, return: `Error: Cannot find corresponding result in the given time range.`\n\nQuestion: {question}"
+
+                response = call_gemini_with_video_clip(
+                    video_path=clip_path,
+                    prompt=prompt,
+                    model_name=config.GEMINI_MODEL_NAME,
+                    api_key=config.GEMINI_API_KEY,
+                    temperature=0,
+                    max_tokens=512,
+                )
+
+                if response:
+                    return response
+
+            except Exception as e:
+                print(f"Gemini video inspection failed, falling back to frames: {e}")
+            finally:
+                if os.path.exists(clip_path):
+                    try:
+                        os.unlink(clip_path)
+                    except Exception:
+                        pass
+
+        prompt = f"These are consecutive frames from a video. Carefully watch these frames. Pay attention to the cause and sequence of events, the detail and movement of objects and the action and pose of persons.\n\nBased on your observations, answer this question. If no relevant content is found, return: `Error: Cannot find corresponding result in the given time range.`\n\nQuestion: {question}"
+
+        response = call_gemini_with_frames(
+            image_paths=files,
+            prompt=prompt,
+            model_name=config.GEMINI_MODEL_NAME,
+            api_key=config.GEMINI_API_KEY,
+            temperature=0,
+            max_tokens=512,
+        )
+
+        if response:
+            return response
+        raise ValueError("No response from Gemini")
+
     msgs = call_openai_model_with_tools(
         messages=input_msgs,
         endpoints=config.AOAI_TOOL_VLM_ENDPOINT_LIST,

@@ -179,5 +179,92 @@ def decode_video_to_frames(video_path: str) -> str:
     cap.release()
     return os.path.abspath(frames_dir)
 
+def extract_video_clip(
+    video_path: str,
+    start_sec: float,
+    end_sec: float,
+    output_path: str,
+) -> str:
+    """
+    Extracts a clip from a video file using ffmpeg (fast, no re-encoding).
+
+    Args:
+        video_path: Path to the source video file.
+        start_sec: Start time in seconds.
+        end_sec: End time in seconds.
+        output_path: Path where the clip will be saved.
+
+    Returns:
+        The absolute path to the extracted clip.
+
+    Raises:
+        FileNotFoundError: If the source video does not exist.
+        RuntimeError: If ffmpeg extraction fails.
+    """
+    import subprocess
+
+    if not os.path.isfile(video_path):
+        raise FileNotFoundError(f"Video file '{video_path}' does not exist.")
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    duration = end_sec - start_sec
+
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-ss', str(start_sec),
+        '-i', video_path,
+        '-t', str(duration),
+        '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero',
+        output_path,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        cmd_reencode = [
+            'ffmpeg',
+            '-y',
+            '-ss', str(start_sec),
+            '-i', video_path,
+            '-t', str(duration),
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-c:a', 'aac',
+            output_path,
+        ]
+        result = subprocess.run(cmd_reencode, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr}")
+
+    return os.path.abspath(output_path)
+
+
+def get_video_duration(video_path: str) -> float:
+    """
+    Get the duration of a video file in seconds.
+
+    Args:
+        video_path: Path to the video file.
+
+    Returns:
+        Duration in seconds.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+
+    if fps > 0:
+        return frame_count / fps
+    return 0.0
+
+
 if __name__ == "__main__":
     download_srt_subtitle("https://www.youtube.com/watch?v=PQFQ-3d2J-8", "./video_database/PQFQ-3d2J-8/subtitles.srt")

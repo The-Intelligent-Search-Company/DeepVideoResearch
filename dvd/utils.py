@@ -49,7 +49,9 @@ def retry_with_exponential_backoff(
                     # Sleep for the delay
                     time.sleep(delay)
                 else:
-                    print(str(e))
+                    print(f"API Error: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
                     return None
 
     return wrapper

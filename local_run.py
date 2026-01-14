@@ -68,7 +68,7 @@ def main():
         caption_file = os.path.join(captions_dir, "captions.json")
         if not os.path.exists(caption_file):
             print("Processing video to get captions...")
-            process_video(frames_dir, captions_dir)
+            process_video(frames_dir, captions_dir, video_path=video_path)
             print("Captions generated.")
         else:
             print(f"Captions already exist at {caption_file}.")

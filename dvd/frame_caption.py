@@ -3,12 +3,15 @@ import functools
 import json
 import multiprocessing as mp
 import os
+import tempfile
 from typing import Dict, List, Tuple
 
 from tqdm import tqdm
 
 import dvd.config as config
 from dvd.utils import call_openai_model_with_tools
+from dvd.gemini_utils import call_gemini_with_video_clip, call_gemini_text
+from dvd.video_utils import extract_video_clip
 
 # --------------------------------------------------------------------------- #
 #                              Prompt templates                               #
@@ -48,6 +51,33 @@ Output template:
 }
 """
 
+
+GEMINI_CAPTION_PROMPT = """Watch this video clip carefully. Pay attention to:
+- The visual content, actions, and movements
+- Any text or captions visible on screen
+- The sequence and timing of events
+- People's appearances, expressions, and interactions
+- Objects, settings, and environmental details
+
+Transcript of current clip (if available):
+TRANSCRIPT_PLACEHOLDER
+
+Output a JSON object in exactly this format:
+{
+  "clip_start_time": "CLIP_START_TIME",
+  "clip_end_time": "CLIP_END_TIME",
+  "subject_registry": {
+    "<subject_id>": {
+      "name": "<short identity if name is unknown>",
+      "appearance": ["<appearance description>"],
+      "identity": ["<identity description>"],
+      "first_seen": "<timestamp>"
+    }
+  },
+  "clip_description": "<detailed natural narration of what happens in this video clip, including visual details, actions, and events in chronological order>"
+}
+
+Be comprehensive and specific in the clip_description. Include timestamps when notable events occur."""
 
 MERGE_PROMPT = """You are given several partial `new_subject_registry` JSON objects extracted from different clips of the *same* video. They may contain duplicated subjects with slightly different IDs or descriptions.
 
@@ -250,6 +280,149 @@ def _caption_clip(task: Tuple[str, Dict], caption_ckpt_folder) -> Tuple[str, dic
     return timestamp, {}  # give up
 
 
+def _caption_clip_gemini(task: Tuple[str, Dict], caption_ckpt_folder: str, video_path: str) -> Tuple[str, dict]:
+    """Gemini-based clip captioning. Extracts video segment and sends to Gemini."""
+    timestamp, info = task
+    transcript = info.get("transcript", "No transcript.")
+
+    start_sec = float(timestamp.split("_")[0])
+    end_sec = float(timestamp.split("_")[1])
+    clip_start_time = convert_seconds_to_hhmmss(start_sec)
+    clip_end_time = convert_seconds_to_hhmmss(end_sec)
+
+    ckpt_file = os.path.join(caption_ckpt_folder, f"{timestamp}.json")
+    if os.path.exists(ckpt_file):
+        with open(ckpt_file, "r") as f:
+            return timestamp, json.load(f)
+
+    clip_path = None
+    tries = 3
+    while tries:
+        tries -= 1
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                clip_path = tmp.name
+
+            extract_video_clip(video_path, start_sec, end_sec, clip_path)
+
+            prompt = GEMINI_CAPTION_PROMPT.replace(
+                "TRANSCRIPT_PLACEHOLDER", transcript
+            ).replace(
+                "CLIP_START_TIME", clip_start_time
+            ).replace(
+                "CLIP_END_TIME", clip_end_time
+            )
+
+            resp = call_gemini_with_video_clip(
+                video_path=clip_path,
+                prompt=prompt,
+                model_name=config.GEMINI_MODEL_NAME,
+                api_key=config.GEMINI_API_KEY,
+                temperature=0.0,
+                max_tokens=4096,
+            )
+
+            if resp is None:
+                continue
+
+            resp = resp.strip()
+            if resp.startswith("```json"):
+                resp = resp[7:]
+            if resp.startswith("```"):
+                resp = resp[3:]
+            if resp.endswith("```"):
+                resp = resp[:-3]
+            resp = resp.strip()
+
+            parsed = json.loads(resp)
+            parsed["clip_description"] += f"\n\nTranscript during this video clip: {transcript}."
+
+            with open(ckpt_file, "w") as f:
+                json.dump(parsed, f)
+
+            return timestamp, parsed
+
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error for clip {timestamp}: {e}")
+            continue
+        except Exception as e:
+            print(f"Error processing clip {timestamp} with Gemini: {e}")
+            continue
+        finally:
+            if clip_path and os.path.exists(clip_path):
+                try:
+                    os.unlink(clip_path)
+                except Exception:
+                    pass
+
+    return timestamp, {}
+
+
+def _caption_clip_gemini_with_frames(task: Tuple[str, Dict], caption_ckpt_folder: str) -> Tuple[str, dict]:
+    """Gemini-based captioning using frames (fallback when video not available)."""
+    timestamp, info = task
+    files, transcript = info["files"], info.get("transcript", "No transcript.")
+
+    clip_start_time = convert_seconds_to_hhmmss(float(timestamp.split("_")[0]))
+    clip_end_time = convert_seconds_to_hhmmss(float(timestamp.split("_")[1]))
+
+    ckpt_file = os.path.join(caption_ckpt_folder, f"{timestamp}.json")
+    if os.path.exists(ckpt_file):
+        with open(ckpt_file, "r") as f:
+            return timestamp, json.load(f)
+
+    from dvd.gemini_utils import call_gemini_with_frames
+
+    prompt = GEMINI_CAPTION_PROMPT.replace(
+        "TRANSCRIPT_PLACEHOLDER", transcript
+    ).replace(
+        "CLIP_START_TIME", clip_start_time
+    ).replace(
+        "CLIP_END_TIME", clip_end_time
+    )
+
+    tries = 3
+    while tries:
+        tries -= 1
+        try:
+            resp = call_gemini_with_frames(
+                image_paths=files,
+                prompt=prompt,
+                model_name=config.GEMINI_MODEL_NAME,
+                api_key=config.GEMINI_API_KEY,
+                temperature=0.0,
+                max_tokens=4096,
+            )
+
+            if resp is None:
+                continue
+
+            resp = resp.strip()
+            if resp.startswith("```json"):
+                resp = resp[7:]
+            if resp.startswith("```"):
+                resp = resp[3:]
+            if resp.endswith("```"):
+                resp = resp[:-3]
+            resp = resp.strip()
+
+            parsed = json.loads(resp)
+            parsed["clip_description"] += f"\n\nTranscript during this video clip: {transcript}."
+
+            with open(ckpt_file, "w") as f:
+                json.dump(parsed, f)
+
+            return timestamp, parsed
+
+        except json.JSONDecodeError:
+            continue
+        except Exception as e:
+            print(f"Error processing clip {timestamp} with Gemini frames: {e}")
+            continue
+
+    return timestamp, {}
+
+
 # --------------------------------------------------------------------------- #
 #                  LLM wrapper – merge subject registries                     #
 # --------------------------------------------------------------------------- #
@@ -290,25 +463,45 @@ def process_video(
     frame_folder: str,
     output_caption_folder: str,
     subtitle_file_path: str = None,
+    video_path: str = None,
 ):
     caption_ckpt_folder = os.path.join(output_caption_folder, "ckpt")
     os.makedirs(caption_ckpt_folder, exist_ok=True)
 
     clips = gather_clip_frames(frame_folder, config.CLIP_SECS, subtitle_file_path)
 
-    caption_clip = functools.partial(
-        _caption_clip,
-        caption_ckpt_folder=caption_ckpt_folder,
-    )
-    # ---------------- Parallel captioning --------------- #
-    with mp.Pool(16) as pool:
-        results = list(
-            tqdm(
-                pool.imap_unordered(caption_clip, clips),
-                total=len(clips),
-                desc=f"Captioning {frame_folder}",
-            )
+    use_gemini = config.USE_GEMINI_FOR_VLM and config.GEMINI_API_KEY
+
+    if use_gemini and video_path and os.path.exists(video_path):
+        print(f"Using Gemini for clip captioning with video: {video_path}")
+        results = []
+        for clip in tqdm(clips, desc=f"Captioning {frame_folder} with Gemini"):
+            result = _caption_clip_gemini(clip, caption_ckpt_folder, video_path)
+            results.append(result)
+    elif use_gemini:
+        print("Using Gemini for clip captioning with frames")
+        caption_clip = functools.partial(
+            _caption_clip_gemini_with_frames,
+            caption_ckpt_folder=caption_ckpt_folder,
         )
+        results = []
+        for clip in tqdm(clips, desc=f"Captioning {frame_folder} with Gemini frames"):
+            result = caption_clip(clip)
+            results.append(result)
+    else:
+        print("Using OpenAI for clip captioning")
+        caption_clip = functools.partial(
+            _caption_clip,
+            caption_ckpt_folder=caption_ckpt_folder,
+        )
+        with mp.Pool(16) as pool:
+            results = list(
+                tqdm(
+                    pool.imap_unordered(caption_clip, clips),
+                    total=len(clips),
+                    desc=f"Captioning {frame_folder}",
+                )
+            )
 
     # ---------------- Save per-clip JSON ---------------- #
     partial_registries = []
@@ -317,9 +510,10 @@ def process_video(
     for ts, parsed in results:
         if parsed:
             frame_captions[ts] = {
-                "caption": parsed["clip_description"],
+                "caption": parsed.get("clip_description", ""),
             }
-            partial_registries.append(parsed["subject_registry"])
+            if parsed.get("subject_registry"):
+                partial_registries.append(parsed["subject_registry"])
 
     # ---------------- Merge subject registries ---------- #
     merged_registry = merge_subject_registries(partial_registries)

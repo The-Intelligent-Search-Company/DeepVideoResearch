@@ -1,5 +1,10 @@
 import os
 
+# ------------------ Gemini configuration ------------------ #
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", None)
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+USE_GEMINI_FOR_VLM = True  # Use Gemini for clip captioning and frame inspection
+
 # ------------------ video download and segmentation configuration ------------------ #
 VIDEO_DATABASE_FOLDER = "./video_database/"
 VIDEO_RESOLUTION = "360" # denotes the height of the video 
@@ -24,7 +29,7 @@ AOAI_EMBEDDING_LARGE_MODEL_NAME = "text-embedding-3-large"
 AOAI_EMBEDDING_LARGE_DIM = 3072
 
 # ------------------ agent and tool setting ------------------ #
-LITE_MODE = True # if True, only leverage srt subtitle, no pixel downloaded or pixel captioning
+LITE_MODE = False # if True, only leverage srt subtitle, no pixel downloaded or pixel captioning
 GLOBAL_BROWSE_TOPK = 300
 OVERWRITE_CLIP_SEARCH_TOPK = 0 # 0 means no overwrite and let agent decide
 
